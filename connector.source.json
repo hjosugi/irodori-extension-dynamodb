@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "extensionId": "irodori.dynamodb",
+  "visibility": "public",
+  "version": "0.1.0",
+  "connector": {
+    "id": "dynamodb.connector",
+    "engine": "dynamodb",
+    "label": "DynamoDB",
+    "aliases": [
+      "dynamodb",
+      "DynamoDB"
+    ],
+    "defaultPort": 443,
+    "wire": "keyValue",
+    "module": "dynamodb.driver",
+    "features": [
+      "metadata"
+    ]
+  },
+  "connection": {
+    "endpoint": {
+      "modes": [
+        "cloudResource",
+        "customEndpoint",
+        "connectionString"
+      ],
+      "defaultPort": 443,
+      "fields": [
+        {
+          "id": "region",
+          "label": "AWS region",
+          "type": "string",
+          "option": "region",
+          "required": true
+        },
+        {
+          "id": "endpoint",
+          "label": "Custom endpoint",
+          "type": "uri",
+          "profileField": "host"
+        }
+      ]
+    },
+    "authMethods": [
+      "none",
+      "connectionString",
+      "awsSigV4",
+      "awsProfile",
+      "awsSso",
+      "webIdentity",
+      "sessionToken",
+      "customDriverOptions"
+    ],
+    "tls": "required",
+    "transports": "default",
+    "optionNamespaces": [
+      "keyValue",
+      "dynamodb",
+      "aws",
+      "catalog",
+      "objectStorage"
+    ],
+    "customDriverOptions": true
+  },
+  "runtime": {
+    "driverLinked": false
+  },
+  "source": {
+    "knowledgeEngineStatus": "recognized_no_connector",
+    "adapter": null
+  }
+}
