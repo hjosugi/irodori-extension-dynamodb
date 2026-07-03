@@ -3,7 +3,7 @@
   "manifestVersion": 1,
   "id": "irodori.dynamodb",
   "name": "DynamoDB Connector",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "irodori",
   "description": "DynamoDB Connector contributes the DynamoDB database connector through the native connector ABI.",
   "license": "MIT OR 0BSD",
@@ -148,6 +148,20 @@
               ]
             },
             {
+              "id": "awsDefaultCredentialsChain",
+              "label": "AWS default credential chain",
+              "kind": "iam",
+              "secretPurposes": [],
+              "fields": [
+                {
+                  "id": "region",
+                  "label": "Region",
+                  "type": "string",
+                  "option": "region"
+                }
+              ]
+            },
+            {
               "id": "awsSigV4",
               "label": "AWS SigV4",
               "kind": "iam",
@@ -241,6 +255,41 @@
                   "label": "Web identity token",
                   "type": "secret",
                   "secretPurpose": "token"
+                }
+              ]
+            },
+            {
+              "id": "awsAssumeRole",
+              "label": "AWS STS assume role",
+              "kind": "iam",
+              "secretPurposes": [
+                "token"
+              ],
+              "fields": [
+                {
+                  "id": "roleArn",
+                  "label": "Role ARN",
+                  "type": "string",
+                  "option": "roleArn",
+                  "required": true
+                },
+                {
+                  "id": "externalId",
+                  "label": "External ID",
+                  "type": "string",
+                  "option": "externalId"
+                },
+                {
+                  "id": "sessionName",
+                  "label": "Session name",
+                  "type": "string",
+                  "option": "sessionName"
+                },
+                {
+                  "id": "region",
+                  "label": "Region",
+                  "type": "string",
+                  "option": "region"
                 }
               ]
             },

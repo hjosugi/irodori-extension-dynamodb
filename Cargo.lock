@@ -1134,14 +1134,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 
 [[package]]
+name = "irodori-connector-abi"
+version = "0.6.0"
+source = "git+https://github.com/hjosugi/irodori-kit?tag=v0.6.0#9050f1b8bed78d8ca9efbd1a699730bce2f35ff3"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "irodori-extension-dynamodb"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aws-config",
  "aws-credential-types",
  "aws-sdk-dynamodb",
  "aws-types",
  "base64",
+ "irodori-connector-abi",
  "serde_json",
  "tokio",
 ]
