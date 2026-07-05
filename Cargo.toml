@@ -2,7 +2,7 @@
 name = "irodori-extension-dynamodb"
 version = "0.1.2"
 edition = "2021"
-license = "MIT OR 0BSD"
+license = "0BSD"
 description = "Native Irodori Table connector extension for DynamoDB."
 repository = "https://github.com/hjosugi/irodori-extension-dynamodb"
 readme = "README.md"
