@@ -7,7 +7,7 @@
   "publisher": "irodori",
   "description": "DynamoDB Connector contributes the DynamoDB database connector through the native connector ABI.",
   "license": "MIT OR 0BSD",
-  "repository": "https://github.com/hjosugi/irodori-extension-dynamodb",
+  "repository": "https://github.com/irodori-table/irodori-extension-dynamodb",
   "apiVersion": "0.1",
   "runtime": "native",
   "entry": "dist/native",
