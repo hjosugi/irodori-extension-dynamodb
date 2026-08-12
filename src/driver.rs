@@ -293,6 +293,7 @@ impl DynamoConfig {
         )
         .map(|value| normalize_endpoint(&value, &region));
         let profile = option_string(request, &["profile", "awsProfile"])
+            .or_else(|| form_profile_name(request))
             .or_else(|| std::env::var("AWS_PROFILE").ok());
         let credentials = credentials_from_request(request).or_else(env_credentials);
         let mut redaction_values = Vec::new();
@@ -733,6 +734,7 @@ fn env_credentials() -> Option<DynamoCredentials> {
 
 fn profile_region(request: &Value) -> Option<String> {
     let profile = option_string(request, &["profile", "awsProfile"])
+        .or_else(|| form_profile_name(request))
         .or_else(|| std::env::var("AWS_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
     let config = std::env::var("AWS_CONFIG_FILE").ok().or_else(|| {
