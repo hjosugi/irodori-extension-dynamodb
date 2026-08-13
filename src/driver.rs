@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use aws_config::sts::AssumeRoleProvider;
 use aws_config::BehaviorVersion;
+use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::Credentials;
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, GlobalSecondaryIndexDescription, KeySchemaElement,
@@ -32,6 +34,10 @@ struct DynamoConfig {
     endpoint: Option<String>,
     profile: Option<String>,
     credentials: Option<DynamoCredentials>,
+    role_arn: Option<String>,
+    role_session_name: Option<String>,
+    external_id: Option<String>,
+    session_duration_secs: Option<u64>,
     redaction_values: Vec<String>,
 }
 
@@ -241,6 +247,29 @@ impl DynamoConnection {
             ));
         }
         let shared_config = loader.load().await;
+        // `aws_config::defaults` above has already resolved the standard chain
+        // — environment, named profile, SSO, web identity, ECS/IMDS. What it
+        // cannot do is take a role ARN from the connection rather than from a
+        // `role_arn`/`source_profile` profile on disk, so wrap the resolved
+        // base credentials when the profile asks for a role.
+        let shared_config = if let Some(role_arn) = config.role_arn.as_deref() {
+            let mut provider = AssumeRoleProvider::builder(role_arn).configure(&shared_config);
+            if let Some(name) = config.role_session_name.as_deref() {
+                provider = provider.session_name(name);
+            }
+            if let Some(external_id) = config.external_id.as_deref() {
+                provider = provider.external_id(external_id);
+            }
+            if let Some(secs) = config.session_duration_secs {
+                provider = provider.session_length(std::time::Duration::from_secs(secs));
+            }
+            shared_config
+                .into_builder()
+                .credentials_provider(SharedCredentialsProvider::new(provider.build().await))
+                .build()
+        } else {
+            shared_config
+        };
         let mut builder = aws_sdk_dynamodb::config::Builder::from(&shared_config);
         if let Some(endpoint) = config.endpoint.as_deref() {
             builder = builder.endpoint_url(endpoint);
@@ -296,6 +325,17 @@ impl DynamoConfig {
             .or_else(|| form_profile_name(request))
             .or_else(|| std::env::var("AWS_PROFILE").ok());
         let credentials = credentials_from_request(request).or_else(env_credentials);
+        let role_arn = option_string(request, &["roleArn", "awsRoleArn", "assumeRoleArn"]);
+        let role_session_name = option_string(
+            request,
+            &["roleSessionName", "awsRoleSessionName", "sessionName"],
+        );
+        let external_id = option_string(request, &["externalId", "awsExternalId"]);
+        let session_duration_secs = option_string(
+            request,
+            &["sessionDurationSeconds", "assumeRoleDurationSeconds"],
+        )
+        .and_then(|value| value.trim().parse::<u64>().ok());
         let mut redaction_values = Vec::new();
         if let Some(endpoint) = endpoint.as_deref() {
             collect_url_auth(endpoint, &mut redaction_values);
@@ -310,6 +350,10 @@ impl DynamoConfig {
             endpoint,
             profile,
             credentials,
+            role_arn,
+            role_session_name,
+            external_id,
+            session_duration_secs,
             redaction_values,
         })
     }
@@ -937,5 +981,53 @@ mod tests {
         assert!(!looks_like_access_key_id("default"));
         assert!(!looks_like_access_key_id("akiaiosfodnn7example"));
         assert!(!looks_like_access_key_id("AKIASHORT"));
+    }
+
+    #[test]
+    fn reads_the_assume_role_options() {
+        let config = DynamoConfig::from_request(&json!({
+            "profile": {
+                "region": "ap-northeast-1",
+                "options": {
+                    "roleArn": "arn:aws:iam::123456789012:role/analytics",
+                    "roleSessionName": "irodori",
+                    "externalId": "shared-secret",
+                    "sessionDurationSeconds": "3600"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            config.role_arn.as_deref(),
+            Some("arn:aws:iam::123456789012:role/analytics")
+        );
+        assert_eq!(config.role_session_name.as_deref(), Some("irodori"));
+        assert_eq!(config.external_id.as_deref(), Some("shared-secret"));
+        assert_eq!(config.session_duration_secs, Some(3600));
+    }
+
+    #[test]
+    fn a_profile_without_a_role_arn_assumes_nothing() {
+        let config = DynamoConfig::from_request(&json!({
+            "profile": { "region": "ap-northeast-1" }
+        }))
+        .unwrap();
+        assert_eq!(config.role_arn, None);
+        assert_eq!(config.session_duration_secs, None);
+    }
+
+    #[test]
+    fn a_non_numeric_session_duration_is_ignored_rather_than_fatal() {
+        // The SDK's own default (1 hour) is a better outcome than refusing to
+        // connect over a malformed optional field.
+        let config = DynamoConfig::from_request(&json!({
+            "profile": {
+                "region": "ap-northeast-1",
+                "options": { "roleArn": "arn:aws:iam::1:role/r", "sessionDurationSeconds": "an hour" }
+            }
+        }))
+        .unwrap();
+        assert_eq!(config.role_arn.as_deref(), Some("arn:aws:iam::1:role/r"));
+        assert_eq!(config.session_duration_secs, None);
     }
 }
