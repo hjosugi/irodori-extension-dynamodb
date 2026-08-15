@@ -293,6 +293,7 @@ impl DynamoConfig {
         )
         .map(|value| normalize_endpoint(&value, &region));
         let profile = option_string(request, &["profile", "awsProfile"])
+            .or_else(|| form_profile_name(request))
             .or_else(|| std::env::var("AWS_PROFILE").ok());
         let credentials = credentials_from_request(request).or_else(env_credentials);
         let mut redaction_values = Vec::new();
@@ -670,11 +671,35 @@ fn bool_option(request: &Value, fields: &[&str]) -> Option<bool> {
         })
 }
 
+/// The desktop connection form gives this engine two credential boxes labelled
+/// "AWS profile / access key" and "Secret / session token", so a profile filled
+/// in through the UI arrives with `user`/`password` rather than the explicit
+/// option names. `password` is unambiguous — it is the secret access key.
+/// `user` is not, so disambiguate it by shape: an access key id is 20 uppercase
+/// alphanumerics beginning with `A` (`AKIA…` long-term, `ASIA…` temporary).
+/// Anything else is a profile name.
+fn looks_like_access_key_id(value: &str) -> bool {
+    value.len() == 20
+        && value.starts_with('A')
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+fn form_access_key_id(request: &Value) -> Option<String> {
+    option_string(request, &["user", "username"]).filter(|value| looks_like_access_key_id(value))
+}
+
+fn form_profile_name(request: &Value) -> Option<String> {
+    option_string(request, &["user", "username"]).filter(|value| !looks_like_access_key_id(value))
+}
+
 fn credentials_from_request(request: &Value) -> Option<DynamoCredentials> {
     let access_key_id = option_string(
         request,
         &["accessKeyId", "accessKey", "awsAccessKeyId", "awsAccessKey"],
-    )?;
+    )
+    .or_else(|| form_access_key_id(request))?;
     let secret_access_key = option_string(
         request,
         &[
@@ -683,7 +708,8 @@ fn credentials_from_request(request: &Value) -> Option<DynamoCredentials> {
             "awsSecretAccessKey",
             "awsSecretKey",
         ],
-    )?;
+    )
+    .or_else(|| option_string(request, &["password"]))?;
     let session_token = option_string(
         request,
         &["sessionToken", "token", "awsSessionToken", "securityToken"],
@@ -708,6 +734,7 @@ fn env_credentials() -> Option<DynamoCredentials> {
 
 fn profile_region(request: &Value) -> Option<String> {
     let profile = option_string(request, &["profile", "awsProfile"])
+        .or_else(|| form_profile_name(request))
         .or_else(|| std::env::var("AWS_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
     let config = std::env::var("AWS_CONFIG_FILE").ok().or_else(|| {
@@ -849,5 +876,66 @@ mod tests {
         assert!(matches!(map.get("id"), Some(AttributeValue::S(value)) if value == "a"));
         assert!(matches!(map.get("count"), Some(AttributeValue::N(value)) if value == "3"));
         assert!(matches!(map.get("tags"), Some(AttributeValue::L(values)) if values.len() == 2));
+    }
+
+    #[test]
+    fn takes_the_secret_access_key_from_the_password_field() {
+        // The connection form labels `user`/`password` "AWS profile / access
+        // key" and "Secret / session token", so this is the shape a profile
+        // filled in through the UI arrives as.
+        let credentials = credentials_from_request(&json!({
+            "profile": {
+                "user": "AKIAIOSFODNN7EXAMPLE",
+                "password": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            }
+        }))
+        .expect("form credentials should resolve");
+        assert_eq!(credentials.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(
+            credentials.secret_access_key,
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        );
+    }
+
+    #[test]
+    fn a_user_that_is_not_an_access_key_id_is_a_profile_name_not_a_credential() {
+        assert!(credentials_from_request(&json!({
+            "profile": { "user": "staging", "password": "secret" }
+        }))
+        .is_none());
+        assert_eq!(
+            form_profile_name(&json!({ "profile": { "user": "staging" } })).as_deref(),
+            Some("staging")
+        );
+        assert_eq!(
+            form_profile_name(&json!({ "profile": { "user": "AKIAIOSFODNN7EXAMPLE" } })),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_credential_options_win_over_the_form_fields() {
+        let credentials = credentials_from_request(&json!({
+            "profile": {
+                "user": "AKIAIOSFODNN7EXAMPLE",
+                "password": "from-the-form",
+                "options": {
+                    "accessKeyId": "AKIAEXPLICITEXPLICIT",
+                    "secretAccessKey": "explicit-secret"
+                }
+            }
+        }))
+        .expect("explicit credentials should resolve");
+        assert_eq!(credentials.access_key_id, "AKIAEXPLICITEXPLICIT");
+        assert_eq!(credentials.secret_access_key, "explicit-secret");
+    }
+
+    #[test]
+    fn recognizes_the_access_key_id_shape() {
+        assert!(looks_like_access_key_id("AKIAIOSFODNN7EXAMPLE"));
+        assert!(looks_like_access_key_id("ASIAIOSFODNN7EXAMPLE"));
+        assert!(!looks_like_access_key_id("default"));
+        assert!(!looks_like_access_key_id("akiaiosfodnn7example"));
+        assert!(!looks_like_access_key_id("AKIASHORT"));
     }
 }
