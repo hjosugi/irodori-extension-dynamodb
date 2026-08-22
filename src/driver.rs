@@ -310,12 +310,18 @@ impl DynamoConfig {
             .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
             .or_else(|| profile_region(request))
             .ok_or_else(|| "DynamoDB requires an AWS region.".to_string())?;
+        // `host` is in this list because that is where the value lands: the
+        // manifest binds the "Custom endpoint" form field to `profileField:
+        // "host"`. Without it the endpoint a user types is read by nobody and
+        // the connector silently talks to the public regional endpoint —
+        // which is why DynamoDB Local never connected.
         let endpoint = option_string(
             request,
             &[
                 "endpoint",
                 "endpointUrl",
                 "endpointURL",
+                "host",
                 "url",
                 "connectionString",
                 "dsn",
@@ -360,17 +366,24 @@ impl DynamoConfig {
     }
 
     fn redact(&self, message: &str) -> String {
-        let endpoint = self.endpoint.as_deref().unwrap_or_default();
-        self.redaction_values.iter().fold(
-            message.replace(endpoint, "<dynamodb-endpoint>"),
-            |message, secret| {
+        // Skipped when there is no endpoint: `str::replace` with an empty
+        // needle inserts the replacement between every character, so a profile
+        // with no custom endpoint turned every error into interleaved noise.
+        let redacted = match self.endpoint.as_deref() {
+            Some(endpoint) if !endpoint.is_empty() => {
+                message.replace(endpoint, "<dynamodb-endpoint>")
+            }
+            _ => message.to_string(),
+        };
+        self.redaction_values
+            .iter()
+            .fold(redacted, |message, secret| {
                 if secret.is_empty() {
                     message
                 } else {
                     message.replace(secret, "****")
                 }
-            },
-        )
+            })
     }
 }
 
@@ -785,12 +798,34 @@ fn profile_section_name(profile: &str) -> String {
 fn normalize_endpoint(value: &str, region: &str) -> String {
     let value = value.trim();
     if value.contains("://") {
-        value.trim_end_matches('/').to_string()
-    } else if value.is_empty() {
-        format!("https://dynamodb.{region}.amazonaws.com")
-    } else {
-        format!("https://{}", value.trim_end_matches('/'))
+        return value.trim_end_matches('/').to_string();
     }
+    if value.is_empty() {
+        return format!("https://dynamodb.{region}.amazonaws.com");
+    }
+    let host = value.trim_end_matches('/');
+    // A bare loopback host is DynamoDB Local, which serves plain HTTP. Adding
+    // `https://` to it produced a TLS handshake failure against a server that
+    // speaks none, with nothing in the message pointing at the scheme.
+    let scheme = if is_loopback_host(host) {
+        "http"
+    } else {
+        "https"
+    };
+    format!("{scheme}://{host}")
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.split('/').next().unwrap_or(host);
+    let host = host.rsplit_once(':').map_or(host, |(name, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            name
+        } else {
+            host
+        }
+    });
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 #[cfg(test)]
@@ -833,6 +868,70 @@ mod tests {
                 .map(|creds| creds.access_key_id.as_str()),
             Some("key")
         );
+    }
+
+    #[test]
+    fn reads_the_custom_endpoint_from_the_host_profile_field() {
+        // The manifest binds the "Custom endpoint" field to `profileField:
+        // "host"`, so this is the shape a profile filled in through the UI
+        // arrives as. Reading only `endpoint`/`url` ignored it outright.
+        let config = DynamoConfig::from_request(&json!({
+            "profile": { "region": "us-east-1", "host": "http://localhost:8000" }
+        }))
+        .expect("host should resolve as the endpoint");
+        assert_eq!(config.endpoint.as_deref(), Some("http://localhost:8000"));
+    }
+
+    #[test]
+    fn a_bare_loopback_endpoint_keeps_plain_http() {
+        // DynamoDB Local speaks HTTP; `https://` against it fails the TLS
+        // handshake with a message that never mentions the scheme.
+        assert_eq!(
+            normalize_endpoint("localhost:8000", "us-east-1"),
+            "http://localhost:8000"
+        );
+        assert_eq!(
+            normalize_endpoint("127.0.0.1:8000", "us-east-1"),
+            "http://127.0.0.1:8000"
+        );
+        assert_eq!(
+            normalize_endpoint("dynamodb.eu-west-1.amazonaws.com", "us-east-1"),
+            "https://dynamodb.eu-west-1.amazonaws.com"
+        );
+        assert_eq!(
+            normalize_endpoint("", "us-east-1"),
+            "https://dynamodb.us-east-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn redaction_leaves_a_message_intact_when_there_is_no_endpoint() {
+        // `str::replace` with an empty needle inserts the replacement between
+        // every character, so this used to return
+        // "<dynamodb-endpoint>T<dynamodb-endpoint>a<dynamodb-endpoint>…".
+        let config = DynamoConfig::from_request(&json!({
+            "profile": { "region": "us-east-1" }
+        }))
+        .expect("region alone is a valid profile");
+        assert!(config.endpoint.is_none());
+        assert_eq!(
+            config.redact("Table not found: orders"),
+            "Table not found: orders"
+        );
+    }
+
+    #[test]
+    fn redaction_still_hides_the_endpoint_and_secrets() {
+        let config = DynamoConfig::from_request(&json!({
+            "profile": {
+                "region": "us-east-1",
+                "host": "http://localhost:8000",
+                "secrets": { "accessKeyId": "AKIAIOSFODNN7EXAMPLE", "secretAccessKey": "shhh" }
+            }
+        }))
+        .expect("profile should resolve");
+        let redacted = config.redact("dial http://localhost:8000 as AKIAIOSFODNN7EXAMPLE failed");
+        assert_eq!(redacted, "dial <dynamodb-endpoint> as **** failed");
     }
 
     #[test]
