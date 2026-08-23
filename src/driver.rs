@@ -328,10 +328,29 @@ impl DynamoConfig {
             ],
         )
         .map(|value| normalize_endpoint(&value, &region));
-        let profile = option_string(request, &["profile", "awsProfile"])
-            .or_else(|| form_profile_name(request))
+        // DynamoDB Local still requires an access key and secret, but accepts
+        // arbitrary alphanumeric values rather than AWS-shaped access key ids.
+        // The desktop's shared user/password fields therefore need a narrowly
+        // scoped exception for loopback endpoints. Public AWS endpoints keep
+        // using the shape check so a value such as `staging` remains a profile
+        // name instead of becoming an invalid static credential.
+        let use_local_form_credentials = endpoint.as_deref().is_some_and(is_loopback_endpoint);
+        let credentials = credentials_from_request(request)
+            .or_else(|| {
+                use_local_form_credentials
+                    .then(|| local_form_credentials(request))
+                    .flatten()
+            })
+            .or_else(env_credentials);
+        let profile = explicit_profile_name(request)
+            .or_else(|| {
+                if credentials.is_none() {
+                    form_profile_name(request)
+                } else {
+                    None
+                }
+            })
             .or_else(|| std::env::var("AWS_PROFILE").ok());
-        let credentials = credentials_from_request(request).or_else(env_credentials);
         let role_arn = option_string(request, &["roleArn", "awsRoleArn", "assumeRoleArn"]);
         let role_session_name = option_string(
             request,
@@ -705,6 +724,23 @@ fn form_profile_name(request: &Value) -> Option<String> {
     option_string(request, &["user", "username"]).filter(|value| !looks_like_access_key_id(value))
 }
 
+fn explicit_profile_name(request: &Value) -> Option<String> {
+    option_string(request, &["awsProfile"]).or_else(|| {
+        [
+            Some(request),
+            request.get("options"),
+            request.get("auth"),
+            request
+                .get("profile")
+                .and_then(|value| value.get("options")),
+            request.get("profile").and_then(|value| value.get("auth")),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|container| abi::string_field(container, "profile").map(ToOwned::to_owned))
+    })
+}
+
 fn credentials_from_request(request: &Value) -> Option<DynamoCredentials> {
     let access_key_id = option_string(
         request,
@@ -732,6 +768,20 @@ fn credentials_from_request(request: &Value) -> Option<DynamoCredentials> {
     })
 }
 
+fn local_form_credentials(request: &Value) -> Option<DynamoCredentials> {
+    let access_key_id = option_string(request, &["user", "username"])?;
+    let secret_access_key = option_string(request, &["password"])?;
+    let session_token = option_string(
+        request,
+        &["sessionToken", "token", "awsSessionToken", "securityToken"],
+    );
+    Some(DynamoCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token,
+    })
+}
+
 fn env_credentials() -> Option<DynamoCredentials> {
     let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
     let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok()?;
@@ -744,7 +794,7 @@ fn env_credentials() -> Option<DynamoCredentials> {
 }
 
 fn profile_region(request: &Value) -> Option<String> {
-    let profile = option_string(request, &["profile", "awsProfile"])
+    let profile = explicit_profile_name(request)
         .or_else(|| form_profile_name(request))
         .or_else(|| std::env::var("AWS_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
@@ -813,6 +863,19 @@ fn normalize_endpoint(value: &str, region: &str) -> String {
         "https"
     };
     format!("{scheme}://{host}")
+}
+
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    let authority = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, remainder)| remainder)
+        .split('/')
+        .next()
+        .unwrap_or(endpoint);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    is_loopback_host(host)
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -1008,6 +1071,60 @@ mod tests {
         assert!(!looks_like_access_key_id("default"));
         assert!(!looks_like_access_key_id("akiaiosfodnn7example"));
         assert!(!looks_like_access_key_id("AKIASHORT"));
+    }
+
+    #[test]
+    fn loopback_endpoint_accepts_dynamodb_local_dummy_credentials() {
+        let config = DynamoConfig::from_request(&json!({
+            "profile": {
+                "region": "us-east-1",
+                "host": "http://localhost:58000",
+                "user": "irodori",
+                "password": "irodori"
+            }
+        }))
+        .expect("DynamoDB Local form fields should resolve");
+
+        let credentials = config
+            .credentials
+            .expect("DynamoDB Local needs dummy credentials");
+        assert_eq!(credentials.access_key_id, "irodori");
+        assert_eq!(credentials.secret_access_key, "irodori");
+        assert!(config.profile.is_none());
+    }
+
+    #[test]
+    fn public_dynamodb_keeps_named_profile_authentication() {
+        let config = DynamoConfig::from_request(&json!({
+            "profile": { "region": "ap-northeast-1", "user": "staging" }
+        }))
+        .expect("a named AWS profile should resolve");
+
+        assert_eq!(config.profile.as_deref(), Some("staging"));
+        assert!(config.credentials.is_none());
+        assert!(config.endpoint.is_none());
+    }
+
+    #[test]
+    fn public_dynamodb_keeps_static_aws_credentials() {
+        let config = DynamoConfig::from_request(&json!({
+            "profile": {
+                "region": "ap-northeast-1",
+                "user": "AKIAIOSFODNN7EXAMPLE",
+                "password": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            }
+        }))
+        .expect("static AWS credentials should resolve");
+
+        assert!(config.profile.is_none());
+        assert_eq!(
+            config
+                .credentials
+                .as_ref()
+                .map(|credentials| credentials.access_key_id.as_str()),
+            Some("AKIAIOSFODNN7EXAMPLE")
+        );
+        assert!(config.endpoint.is_none());
     }
 
     #[test]
