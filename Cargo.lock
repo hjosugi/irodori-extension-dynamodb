@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "irodori-extension-dynamodb"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aws-config",
  "aws-credential-types",
