@@ -385,24 +385,12 @@ impl DynamoConfig {
     }
 
     fn redact(&self, message: &str) -> String {
-        // Skipped when there is no endpoint: `str::replace` with an empty
-        // needle inserts the replacement between every character, so a profile
-        // with no custom endpoint turned every error into interleaved noise.
-        let redacted = match self.endpoint.as_deref() {
-            Some(endpoint) if !endpoint.is_empty() => {
-                message.replace(endpoint, "<dynamodb-endpoint>")
-            }
-            _ => message.to_string(),
-        };
-        self.redaction_values
-            .iter()
-            .fold(redacted, |message, secret| {
-                if secret.is_empty() {
-                    message
-                } else {
-                    message.replace(secret, "****")
-                }
-            })
+        abi::redact_endpoint(
+            message,
+            self.endpoint.as_deref().unwrap_or_default(),
+            "<dynamodb-endpoint>",
+            &self.redaction_values,
+        )
     }
 }
 
