@@ -24,7 +24,7 @@ name = "irodori_extension_dynamodb"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-irodori-connector-abi = { git = "https://github.com/irodori-table/irodori-kit", tag = "v0.8.1" }
+irodori-connector-abi = { git = "https://github.com/irodori-table/irodori-kit", tag = "v0.9.0" }
 aws-config = "1"
 aws-credential-types = "1"
 aws-sdk-dynamodb = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
